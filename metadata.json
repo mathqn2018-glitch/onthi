@@ -1,0 +1,5 @@
+{
+  "name": "MathPath AI - Lộ Trình Ôn Thi Toán",
+  "description": "Ứng dụng lập kế hoạch ôn thi môn Toán cá nhân hóa, tạo bài tập và chấm điểm tự động sử dụng Gemini AI.",
+  "requestFramePermissions": []
+}
