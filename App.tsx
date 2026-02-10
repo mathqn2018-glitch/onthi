@@ -5,6 +5,9 @@ import * as Storage from './services/storage';
 import * as SpacedRepetition from './services/spacedRepetition';
 import * as Analytics from './services/analytics';
 import * as AchievementService from './services/achievements';
+import { GRADE_CONTENT, getGradeDisplayName } from './services/gradeContent';
+import * as WordExport from './services/wordExport';
+import * as ErrorAnalysis from './services/errorAnalysis';
 import MathRenderer from './components/MathRenderer';
 import ApiKeyModal from './components/ApiKeyModal';
 import ThemeToggle from './components/ThemeToggle';
@@ -54,10 +57,11 @@ const App: React.FC = () => {
   // User & Roadmap Data
   const [userProfile, setUserProfile] = useState<UserProfile>({
     name: '',
+    gradeLevel: '11', // Default to grade 11
     currentLevel: '',
     targetExam: '',
     targetScore: '',
-    startDate: new Date().toISOString().split('T')[0], // Default to today
+    startDate: new Date().toISOString().split('T')[0],
     examDate: '',
     studyStreak: 0,
     longestStreak: 0,
@@ -79,12 +83,21 @@ const App: React.FC = () => {
   const [practicePhase, setPracticePhase] = useState<PracticePhase>('SETUP');
   const [quizConfig, setQuizConfig] = useState<QuizConfig>({
     difficulty: 'Trung bình',
-    questionCount: 5,
-    selectedTypes: ['multiple_choice', 'true_false', 'short_answer']
+    questionTypes: [
+      { type: 'multiple_choice', count: 3, enabled: true },
+      { type: 'true_false', count: 2, enabled: true },
+      { type: 'short_answer', count: 0, enabled: false }
+    ],
+    timerEnabled: false,
+    timerDuration: 45 // default 45 minutes
   });
   const [questions, setQuestions] = useState<Question[]>([]);
   const [userAnswers, setUserAnswers] = useState<Record<number, string>>({});
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null);
+
+  // Timer State
+  const [timeRemaining, setTimeRemaining] = useState<number>(0); // in seconds
+  const [timerActive, setTimerActive] = useState<boolean>(false);
 
   // New State for Enhanced Features
   const [studySessions, setStudySessions] = useState<StudySession[]>([]);
@@ -134,6 +147,27 @@ const App: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  // Timer Effect
+  useEffect(() => {
+    if (timerActive && timeRemaining > 0) {
+      const interval = setInterval(() => {
+        setTimeRemaining(prev => {
+          if (prev <= 1) {
+            setTimerActive(false);
+            // Auto-submit when time runs out
+            if (practicePhase === 'TAKING') {
+              showToast('⏰ Hết giờ! Tự động nộp bài.', 'error');
+              handleSubmitQuiz();
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [timerActive, timeRemaining, practicePhase]);
 
   // --- Helper Functions ---
 
@@ -246,6 +280,91 @@ const App: React.FC = () => {
       userProfile.lastStudyDate
     );
     setStats(updatedStats);
+  };
+
+  // Quiz Config Helper Functions
+  const getTotalQuestions = (config: QuizConfig): number => {
+    return config.questionTypes
+      .filter(qt => qt.enabled && qt.count > 0)
+      .reduce((sum, qt) => sum + qt.count, 0);
+  };
+
+  const updateQuestionType = (index: number, field: 'enabled' | 'count', value: boolean | number) => {
+    const updated = [...quizConfig.questionTypes];
+    if (field === 'enabled') {
+      updated[index].enabled = value as boolean;
+      if (!value) updated[index].count = 0;
+    } else {
+      updated[index].count = value as number;
+    }
+    setQuizConfig({ ...quizConfig, questionTypes: updated });
+  };
+
+  const adjustQuestionCount = (index: number, delta: number) => {
+    const updated = [...quizConfig.questionTypes];
+    const newCount = Math.max(0, Math.min(20, updated[index].count + delta));
+    updated[index].count = newCount;
+    setQuizConfig({ ...quizConfig, questionTypes: updated });
+  };
+
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Export & Analysis Handlers
+  const handleExportQuiz = async (includeAnswers: boolean) => {
+    if (!activeTopic || questions.length === 0) {
+      showToast('Không có bài thi để xuất!', 'error');
+      return;
+    }
+
+    try {
+      await WordExport.exportQuizToWord(
+        activeTopic.topic,
+        questions,
+        quizConfig,
+        includeAnswers
+      );
+      showToast('✅ Đã xuất file Word thành công!', 'success');
+    } catch (error) {
+      console.error('Export error:', error);
+      showToast('❌ Lỗi khi xuất file Word', 'error');
+    }
+  };
+
+  const handleAnalyzeErrors = async () => {
+    if (!activeTopic || questions.length === 0 || !quizResult) {
+      showToast('Chưa có kết quả để phân tích!', 'error');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const report = await ErrorAnalysis.analyzeQuizErrors(
+        apiKey,
+        activeTopic.topic,
+        questions,
+        userAnswers
+      );
+
+      // Save report
+      Storage.saveAnalysisReport(report);
+
+      // Update quiz result
+      setQuizResult({
+        ...quizResult,
+        analysisReport: report
+      });
+
+      showToast('✅ Phân tích hoàn tất!', 'success');
+    } catch (error: any) {
+      console.error('Analysis error:', error);
+      showToast(error.message || '❌ Lỗi khi phân tích', 'error');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // --- Handlers ---
@@ -410,6 +529,58 @@ const App: React.FC = () => {
                   placeholder="VD: Nguyễn Văn A"
                 />
               </div>
+            </div>
+
+            {/* Grade Level Selection */}
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-3">
+                <i className="fa-solid fa-graduation-cap text-brand-500 mr-2"></i>
+                Bạn đang học lớp mấy?
+              </label>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {(['10', '11', '12'] as GradeLevel[]).map(grade => (
+                  <button
+                    key={grade}
+                    type="button"
+                    onClick={() => setUserProfile({ ...userProfile, gradeLevel: grade })}
+                    className={`p-4 rounded-xl border-2 transition-all ${userProfile.gradeLevel === grade
+                      ? 'border-brand-500 bg-brand-50 text-brand-700 shadow-md'
+                      : 'border-slate-200 bg-white hover:border-brand-300 text-slate-600'
+                      }`}
+                  >
+                    <div className="text-2xl font-bold">Lớp {grade}</div>
+                    <div className="text-xs mt-1 opacity-75">
+                      {GRADE_CONTENT[grade].topics.length} chủ đề
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Foundation Level Option */}
+              <button
+                type="button"
+                onClick={() => setUserProfile({ ...userProfile, gradeLevel: 'foundation' })}
+                className={`w-full p-3 rounded-xl border-2 transition-all text-sm ${userProfile.gradeLevel === 'foundation'
+                  ? 'border-orange-500 bg-orange-50 text-orange-700 shadow-md'
+                  : 'border-slate-200 bg-white hover:border-orange-300 text-slate-600'
+                  }`}
+              >
+                <i className="fa-solid fa-book mr-2"></i>
+                Mất gốc - Học lại từ đầu (THCS)
+              </button>
+
+              {/* Content Preview */}
+              {userProfile.gradeLevel && (
+                <div className="mt-3 p-4 bg-blue-50 rounded-xl border border-blue-200 animate-fade-in">
+                  <p className="text-sm font-semibold text-blue-800 mb-2">
+                    📚 {GRADE_CONTENT[userProfile.gradeLevel].description}
+                  </p>
+                  <p className="text-xs text-blue-600 leading-relaxed">
+                    <strong>Nội dung:</strong> {GRADE_CONTENT[userProfile.gradeLevel].topics.slice(0, 4).join(', ')}
+                    {GRADE_CONTENT[userProfile.gradeLevel].topics.length > 4 && '...'}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-4">
